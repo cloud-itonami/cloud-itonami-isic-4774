@@ -1,0 +1,44 @@
+(ns resale.llm-test
+  "ResaleAdvisor-LLM proposal generation, unit-level (no governor/actor
+  involved — that integration is covered by policy_contract_test)."
+  (:require [clojure.test :refer [deftest is testing]]
+            [resale.store :as store]
+            [resale.llm :as llm]))
+
+(deftest intake-proposal-normalizes-value
+  (let [db (store/seed-db)
+        p (llm/infer db {:op :item/intake :subject "it-900" :item-id "it-900" :category :apparel
+                         :brand "X" :condition-claimed :good :seller-id "sl-1" :price 30.00M})]
+    (is (= :item-upsert (:effect p)))
+    (is (= :intake (get-in p [:value :status])))
+    (is (>= (:confidence p) 0.9))))
+
+(deftest unsourced-authenticate-proposal-carries-nil-source
+  (testing "the LLM layer does not filter — that is the governor's job; this only proves the injected failure mode actually reaches the proposal"
+    (let [db (store/seed-db)
+          p (llm/infer db {:op :item/authenticate :subject "it-400" :item-id "it-400" :verdict :authentic
+                           :confidence 0.9 :condition-verified :good
+                           :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-demo-auth"}
+                           :unsourced? true})]
+      (is (nil? (:source p)))
+      (is (>= (:confidence p) 0.85) "still high-confidence — proves source-provenance cannot rely on confidence as a proxy"))))
+
+(deftest sale-proposal-carries-item-snapshot
+  (let [db (store/seed-db)
+        p (llm/infer db {:op :sale/confirm :subject "it-200" :item-id "it-200" :buyer-id "by-1"})]
+    (is (= :sale-confirm (:effect p)))
+    (is (= :luxury-handbags (get-in p [:value :category])))
+    (is (= :sold (get-in p [:value :status])))))
+
+(deftest disclosure-proposal-greedy-adds-extra-columns
+  (let [db (store/seed-db)
+        clean (llm/infer db {:op :disclosure/query :subject "it-100" :item-id "it-100"})
+        greedy (llm/infer db {:op :disclosure/query :subject "it-100" :item-id "it-100" :greedy? true})]
+    (is (< (count (:columns clean)) (count (:columns greedy))))
+    (is (some #{:seller-id :raw-source} (:columns greedy)))))
+
+(deftest correction-proposal-never-marks-high-confidence
+  (let [db (store/seed-db)
+        p (llm/infer db {:op :correction/request :subject "it-100" :disputed-field :condition-claimed :claim :fair})]
+    (is (= :correction-apply (:effect p)))
+    (is (< (:confidence p) 0.9) "disputes are claims pending human verification, never auto-confident")))

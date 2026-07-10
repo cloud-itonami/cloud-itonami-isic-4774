@@ -1,0 +1,211 @@
+(ns resale.policy
+  "ResaleGovernor — the independent compliance layer that earns the
+  ResaleAdvisor-LLM the right to intake, authenticate, sell or resolve a
+  dispute. The LLM has no notion of secondhand-dealer reporting duties,
+  counterfeit/IP law, condition-grading integrity, or a subscriber's
+  disclosure entitlement, so this MUST be a separate system able to
+  *reject* a proposal and fall back to HOLD — this actor's analog of
+  `cloud-itonami-isic-6311`'s MarketDataGovernor and robotaxi's Minimal
+  Risk Condition.
+
+  Six HARD checks (a human approver CANNOT override) and three SOFT checks
+  (always route to a human, who may approve):
+
+    1. rbac                        — does actor-role have permission for op?
+    2. stolen-goods-reporting-gate — a high-value/flagged-category item
+                                      intake from a non-KYC or flagged
+                                      seller is rejected outright (this
+                                      actor's analog of real secondhand-
+                                      dealer reporting statutes; CA B&P
+                                      Code §21625 et seq., NY GBL Art. 5
+                                      §§60-70).
+    3. source-provenance-gate      — an authentication verdict must cite an
+                                      allowed provenance class, and for
+                                      `:licensed-authentication-service`, an
+                                      ACTIVE license.
+    4. counterfeit-flag-gate       — a sale of an item in a category that
+                                      requires authentication cannot
+                                      confirm unless the current
+                                      authentication verdict is
+                                      `:authentic`.
+    5. condition-misrepresentation-gate — a sale cannot confirm if the
+                                      verified condition grade is more than
+                                      one step below the claimed grade.
+    6. licensed-disclosure         — active subscriber contract required,
+                                      columns capped at the tier.
+    7. confidence floor            — SOFT, LLM confidence below threshold.
+    8. high-value-holding-period gate — SOFT, ANY high-value sale always
+                                      escalates to a human, regardless of
+                                      confidence (mirrors real mandatory
+                                      holding-period statutes before a
+                                      secondhand dealer may resell).
+    9. dispute (correction) requests — SOFT, unconditional, never
+                                      auto-resolves at any phase."
+  (:require [clojure.set :as set]
+            [resale.facts :as facts]
+            [resale.store :as store]))
+
+;; ───────────────────────── policy tables ─────────────────────────
+
+(def confidence-floor 0.6)
+
+(def condition-scale [:poor :fair :good :excellent :new])
+(def ^:private condition-rank (zipmap condition-scale (range)))
+
+(defn- grade-index [g] (get condition-rank g -1))
+
+(def permissions
+  "actor-role → set of operations it may perform."
+  {:listing-agent      #{:item/intake :item/authenticate :sale/confirm}
+   :compliance-officer #{:item/intake :item/authenticate :sale/confirm :correction/request}
+   :subscriber         #{:disclosure/query}})
+
+(def tier-columns
+  "For `:disclosure/query` — the columns each licensed subscriber tier may
+  see. Anything beyond this is over-disclosure."
+  (let [base #{:id :category :brand :condition-claimed :status :price}
+        pro-extra #{:condition-verified :authentication}
+        inst-extra #{:seller-id :raw-source}]
+    {:tier/basic         base
+     :tier/pro           (into base pro-extra)
+     :tier/institutional (into base (into pro-extra inst-extra))}))
+
+;; ───────────────────────── checks ─────────────────────────
+
+(defn- rbac-violations [{:keys [op]} {:keys [actor-role]}]
+  (when-not (contains? (get permissions actor-role #{}) op)
+    [{:rule :rbac :detail (str actor-role " は " op " の権限を持たない")}]))
+
+(defn- stolen-goods-reporting-violations
+  "Only `:item/intake` asserts a new item into inventory. A high-value or
+  flagged-category item from a seller who is not KYC-verified, or who is
+  already flagged for a prior stolen-goods report, is rejected outright —
+  confidence-independent, this is a legal reporting duty, not a risk
+  estimate."
+  [{:keys [op]} proposal st]
+  (when (= op :item/intake)
+    (let [{:keys [category seller-id]} (:value proposal)
+          sl (store/seller st seller-id)]
+      (when (contains? facts/high-value-categories category)
+        (cond
+          (nil? sl)
+          [{:rule :stolen-goods-reporting-gate :detail (str "未登録の seller: " seller-id)}]
+
+          (not (:kyc-verified? sl))
+          [{:rule :stolen-goods-reporting-gate
+            :detail (str "高額/要注意カテゴリの intake だが seller が KYC 未完了: " seller-id)}]
+
+          (:reported-stolen-flag? sl)
+          [{:rule :stolen-goods-reporting-gate
+            :detail (str "seller が過去の盗品報告フラグ付き: " seller-id)}])))))
+
+(defn- source-provenance-violations
+  "Only `:item/authenticate` asserts new provenance. A missing source, a
+  `:class` outside `resale.facts/allowed-source-classes`, or a licensed
+  class citation whose `:license-id` does not resolve to an ACTIVE license
+  covering that class, is a HARD rejection regardless of confidence."
+  [{:keys [op]} proposal st]
+  (when (= op :item/authenticate)
+    (let [src (:source proposal)]
+      (cond
+        (or (nil? src) (not (facts/class-allowed? (:class src))))
+        [{:rule :source-provenance-gate
+          :detail (str "出典が無いか許可された出典クラスでない: " (pr-str src))}]
+
+        (facts/licensed-class? (:class src))
+        (let [lic (store/verification-license st (:license-id src))]
+          (when (or (nil? lic) (not (:active? lic)) (not (contains? (:classes lic) (:class src))))
+            [{:rule :source-provenance-gate
+              :detail (str "有効な verification-license が無いかクラス対象外: license-id="
+                           (:license-id src))}]))
+
+        :else nil))))
+
+(defn- counterfeit-flag-violations
+  "Only `:sale/confirm` finalizes a transaction. A category requiring
+  authentication (`resale.facts/authentication-required-categories`)
+  cannot sell unless the current authentication verdict is `:authentic` —
+  a missing verdict, an `:inconclusive` verdict, and especially a
+  `:counterfeit` verdict all block the sale, unconditionally."
+  [{:keys [op]} proposal st]
+  (when (= op :sale/confirm)
+    (let [item-id (get-in proposal [:value :id])
+          it (store/item st item-id)]
+      (when (contains? facts/authentication-required-categories (:category it))
+        (let [auth (store/authentication st item-id)]
+          (when (not= :authentic (:verdict auth))
+            [{:rule :counterfeit-flag-gate
+              :detail (str "要認証カテゴリだが verdict が :authentic でない: "
+                           (pr-str (:verdict auth)))}]))))))
+
+(defn- condition-misrepresentation-violations
+  "Only `:sale/confirm` finalizes a transaction. If the verified grade is
+  more than one step below the claimed grade, the listing misrepresents
+  the item's condition and cannot sell as-is."
+  [{:keys [op]} proposal st]
+  (when (= op :sale/confirm)
+    (let [item-id (get-in proposal [:value :id])
+          it (store/item st item-id)
+          claimed (grade-index (:condition-claimed it))
+          verified (grade-index (:condition-verified it))]
+      (when (and (>= claimed 0) (>= verified 0) (> (- claimed verified) 1))
+        [{:rule :condition-misrepresentation-gate
+          :detail (str "claimed=" (:condition-claimed it) " verified=" (:condition-verified it)
+                       " (乖離2段階以上)")}]))))
+
+(defn- licensed-disclosure-violations
+  "`:disclosure/query` is only ever served against a Store-registered,
+  active contract. Over-disclosure (columns beyond the contract's tier) is
+  checked the same pass."
+  [{:keys [op]} {:keys [tenant]} proposal st]
+  (when (= op :disclosure/query)
+    (let [c (when tenant (store/contract st tenant))]
+      (if (or (nil? c) (not (:active? c)))
+        [{:rule :licensed-disclosure :detail (str "有効な契約が無い: tenant=" tenant)}]
+        (let [allowed (get tier-columns (:tier c) #{})
+              cols    (set (:columns proposal))
+              extra   (set/difference cols allowed)]
+          (when (seq extra)
+            [{:rule :licensed-disclosure
+              :detail (str "契約 tier " (:tier c) " に対し過剰な列: " (vec extra))}]))))))
+
+(defn- high-value-sale? [proposal st]
+  (let [item-id (get-in proposal [:value :id])]
+    (= :high-value (:value-tier (store/item st item-id)))))
+
+(defn check
+  "Censors a ResaleAdvisor-LLM proposal against the policy tables. Returns
+   {:ok? bool :violations [..] :confidence c :escalate? bool :high-value? bool
+    :hard? bool :correction? bool}."
+  [request context proposal st]
+  (let [hard    (into []
+                      (concat (rbac-violations request context)
+                              (stolen-goods-reporting-violations request proposal st)
+                              (source-provenance-violations request proposal st)
+                              (counterfeit-flag-violations request proposal st)
+                              (condition-misrepresentation-violations request proposal st)
+                              (licensed-disclosure-violations request context proposal st)))
+        conf        (:confidence proposal 0.0)
+        low?        (< conf confidence-floor)
+        high-value? (and (= :sale/confirm (:op request)) (high-value-sale? proposal st))
+        correction? (= :correction/request (:op request))
+        hard?       (boolean (seq hard))]
+    {:ok?          (and (not hard?) (not low?) (not high-value?) (not correction?))
+     :violations   hard
+     :confidence   conf
+     :hard?        hard?
+     :escalate?    (and (not hard?) (or low? high-value? correction?))
+     :high-value?  high-value?
+     :correction?  correction?}))
+
+(defn hold-fact
+  "The audit fact written when a proposal is rejected (HOLD)."
+  [request context verdict]
+  {:t          :policy-hold
+   :op         (:op request)
+   :actor      (:actor-id context)
+   :subject    (:subject request)
+   :disposition :hold
+   :basis      (mapv :rule (:violations verdict))
+   :violations (:violations verdict)
+   :confidence (:confidence verdict)})

@@ -1,0 +1,37 @@
+(ns resale.facts-test
+  "The R0 source catalog is the whole ground truth for the source-
+  provenance gate — these tests guard its own internal honesty."
+  (:require [clojure.test :refer [deftest is testing]]
+            [resale.facts :as facts]))
+
+(deftest catalog-entries-are-well-formed
+  (doseq [{:keys [id name class access]} facts/catalog]
+    (testing (str id)
+      (is (keyword? id))
+      (is (string? name))
+      (is (keyword? class))
+      (is (keyword? access)))))
+
+(deftest allowed-source-classes-matches-catalog
+  (is (= (into #{} (map :class facts/catalog)) facts/allowed-source-classes)))
+
+(deftest class-allowed?-rejects-unlisted-classes
+  (is (facts/class-allowed? :public-trademark-registry))
+  (is (facts/class-allowed? :licensed-authentication-service))
+  (is (facts/class-allowed? :licensed-secondhand-reporting-feed))
+  (is (not (facts/class-allowed? :seller-assertion)))
+  (is (not (facts/class-allowed? :inference)))
+  (is (not (facts/class-allowed? nil))))
+
+(deftest licensed-class-recognized
+  (is (facts/licensed-class? :licensed-authentication-service))
+  (is (facts/licensed-class? :licensed-secondhand-reporting-feed))
+  (is (not (facts/licensed-class? :public-trademark-registry))))
+
+(deftest coverage-is-honest-not-aspirational
+  (let [c (facts/coverage)]
+    (is (= (count facts/catalog) (:source-count c)))
+    (is (<= (:source-count c) 20) "R0 catalog should stay small and citable, not bulk-padded")
+    (is (= 1 (count (:free-public-sources c))) "exactly the 1 real, free, official source")
+    (is (contains? (:high-value-categories c) :jewelry))
+    (is (contains? (:authentication-required-categories c) :watches))))

@@ -1,0 +1,107 @@
+(ns resale.sim
+  "Demo runner: push eight representative operations through one
+  OperationActor and watch the ResaleGovernor + approval workflow earn the
+  ResaleAdvisor-LLM the right to intake, authenticate, sell or resolve a
+  dispute.
+
+    op1  標準カテゴリの item intake(KYC済み seller)         → commit
+    op2  高額カテゴリの item intake が未KYC seller から       → stolen-goods-reporting REJECT → hold
+    op3  authenticate が出典なしで提案                        → source-provenance REJECT → hold
+    op4  要認証カテゴリの sale/confirm だが authentic verdict無 → counterfeit-flag REJECT → hold
+    op5  claimed/verified の条件差が2段階以上                 → condition-misrepresentation REJECT → hold
+    op6  高額品の sale/confirm(governor clean でも常に人間承認) → escalate → approve → commit
+    op7  紛争申立て(どの phase でも常に人間レビュー)          → escalate → approve → commit
+    op8  開示クエリが未契約 tenant から                       → licensed-disclosure REJECT → hold
+
+  Run: clojure -M:dev:run"
+  (:require [langgraph.graph :as g]
+            [resale.store :as store]
+            [resale.operation :as op]
+            [resale.facts :as facts]
+            [resale.report :as report]))
+
+(defn- line [& xs] (println (apply str xs)))
+
+(defn- run-op!
+  "Run one operation on its own thread-id. If it interrupts for human
+  approval, a compliance officer 'approves' and we resume."
+  [actor thread-id request context approve?]
+  (let [res (g/run* actor {:request request :context context} {:thread-id thread-id})]
+    (if (= :interrupted (:status res))
+      (do (line "   ⏸  人間レビュー待ち (reason: "
+                (-> res :state :audit last :reason) ")")
+          (let [res2 (g/run* actor
+                             {:approval {:status (if approve? :approved :rejected)
+                                         :by "compliance-1"}}
+                             {:thread-id thread-id :resume? true})]
+            (line "   ▶  " (if approve? "承認 → " "却下 → ") "disposition = "
+                  (get-in res2 [:state :disposition]))
+            res2))
+      (do (line "   → disposition = " (get-in res [:state :disposition])
+                "  (confidence " (get-in res [:state :verdict :confidence]) ")")
+          res))))
+
+(defn -main [& _]
+  (let [db    (store/seed-db)
+        actor (op/build db)
+        agent   {:actor-id "la-1" :actor-role :listing-agent :phase 3}
+        officer {:actor-id "co-1" :actor-role :compliance-officer :phase 3}]
+
+    (line "── R0 出典カバレッジ(正直な現状) ──")
+    (line (pr-str (facts/coverage)))
+
+    (line "\n── OperationActor (ResaleAdvisor-LLM sealed; ResaleGovernor active) ──")
+
+    (line "\nop1  標準カテゴリの item intake(KYC済み seller)")
+    (run-op! actor "op1"
+             {:op :item/intake :subject "it-700" :item-id "it-700" :category :apparel
+              :brand "DemoWear" :condition-claimed :good :seller-id "sl-1" :price 55.00M}
+             agent true)
+
+    (line "\nop2  高額カテゴリ(jewelry)の item intake — seller(sl-3)が未KYC")
+    (run-op! actor "op2"
+             {:op :item/intake :subject "it-800" :item-id "it-800" :category :jewelry
+              :brand nil :condition-claimed :good :seller-id "sl-3" :price 4000.00M}
+             agent true)
+
+    (line "\nop3  authenticate — ResaleAdvisor-LLM が出典なしで提案")
+    (run-op! actor "op3"
+             {:op :item/authenticate :subject "it-400" :item-id "it-400" :verdict :authentic
+              :confidence 0.9 :condition-verified :good
+              :source {:class :licensed-authentication-service :ref "lic-demo-auth:it-400" :license-id "lic-demo-auth"}
+              :unsourced? true}
+             agent true)
+
+    (line "\nop4  要認証カテゴリ(watches)の sale — authentic verdict が記録されていない")
+    (run-op! actor "op4"
+             {:op :sale/confirm :subject "it-400" :item-id "it-400" :buyer-id "by-1"}
+             agent true)
+
+    (line "\nop5  claimed(excellent)/verified(poor)の条件差が2段階以上")
+    (run-op! actor "op5"
+             {:op :sale/confirm :subject "it-600" :item-id "it-600" :buyer-id "by-2"}
+             agent true)
+
+    (line "\nop6  高額品(luxury-handbags, 認証済み)の sale — governor clean でも常に人間承認")
+    (run-op! actor "op6"
+             {:op :sale/confirm :subject "it-200" :item-id "it-200" :buyer-id "by-3"}
+             agent true)
+
+    (line "\nop7  紛争申立て — 買主が condition-claimed に異議(どの phase でも常に人間レビュー)")
+    (run-op! actor "op7"
+             {:op :correction/request :subject "it-100" :disputed-field :condition-claimed :claim :fair}
+             officer true)
+
+    (line "\nop8  開示クエリ(登録されていない tenant から)")
+    (run-op! actor "op8"
+             {:op :disclosure/query :subject "it-100" :item-id "it-100"}
+             {:actor-id "sub-1" :actor-role :subscriber :tenant "tenant-ghost"} true)
+
+    (line "\n── 開示(governor が承認した tier/basic 列のみ) ──")
+    (line (pr-str (report/render-item db "it-100" [:id :category :brand :condition-claimed :status :price])))
+
+    (line "\n── 監査台帳 (append-only) ──")
+    (doseq [f (store/ledger db)]
+      (line "  " (store/ledger-line f)))
+
+    (line "\ndone.")))

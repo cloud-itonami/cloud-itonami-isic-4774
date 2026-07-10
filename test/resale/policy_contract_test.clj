@@ -1,0 +1,210 @@
+(ns resale.policy-contract-test
+  "The governor contract as executable tests — the analog of
+  `cloud-itonami-isic-6311`'s policy_contract_test / robotaxi's
+  safety_contract_test. The single invariant under test:
+
+    ResaleAdvisor-LLM never intakes/authenticates/sells/discloses a record
+    the ResaleGovernor would reject, and every decision (commit OR hold)
+    leaves exactly one ledger fact."
+  (:require [clojure.test :refer [deftest is testing]]
+            [langgraph.graph :as g]
+            [resale.store :as store]
+            [resale.operation :as op]))
+
+(defn- fresh []
+  (let [db (store/seed-db)]
+    [db (op/build db)]))
+
+(def listing-agent {:actor-id "la-1" :actor-role :listing-agent :phase 3})
+(def officer    {:actor-id "co-1" :actor-role :compliance-officer :phase 3})
+(def subscriber {:actor-id "sub-1" :actor-role :subscriber})
+
+(defn- exec-op [actor tid request context]
+  (g/run* actor {:request request :context context} {:thread-id tid}))
+
+(deftest authorized-intake-commits
+  (let [[db actor] (fresh)
+        res (exec-op actor "t1"
+                  {:op :item/intake :subject "it-999" :item-id "it-999" :category :apparel
+                   :brand "X" :condition-claimed :good :seller-id "sl-1" :price 40.00M}
+                  listing-agent)]
+    (is (= :commit (get-in res [:state :disposition])))
+    (is (= :intake (:status (store/item db "it-999"))) "SSoT actually updated")
+    (is (= 1 (count (store/ledger db))))
+    (is (= :commit (-> (store/ledger db) first :disposition)))))
+
+(deftest unauthorized-role-is-held
+  (testing "a :subscriber role has no intake permission → HOLD, no write"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t2"
+                    {:op :item/intake :subject "it-999" :item-id "it-999" :category :apparel
+                     :brand "X" :condition-claimed :good :seller-id "sl-1" :price 40.00M}
+                    subscriber)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (nil? (store/item db "it-999")) "SSoT unchanged")
+      (is (= [:rbac] (-> (store/ledger db) first :basis))))))
+
+(deftest high-value-intake-from-unverified-seller-is-held
+  (testing "jewelry intake from a non-KYC seller → HOLD (stolen-goods-reporting-gate)"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t3"
+                    {:op :item/intake :subject "it-999" :item-id "it-999" :category :jewelry
+                     :brand nil :condition-claimed :good :seller-id "sl-3" :price 5000.00M}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:stolen-goods-reporting-gate} (-> (store/ledger db) first :basis)))
+      (is (nil? (store/item db "it-999"))))))
+
+(deftest high-value-intake-from-flagged-seller-is-held
+  (testing "even a KYC-verified seller with a prior stolen-goods flag is held"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t3b"
+                    {:op :item/intake :subject "it-999" :item-id "it-999" :category :jewelry
+                     :brand nil :condition-claimed :good :seller-id "sl-4" :price 5000.00M}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:stolen-goods-reporting-gate} (-> (store/ledger db) first :basis))))))
+
+(deftest unsourced-authentication-is-held
+  (testing "an authentication verdict with no source citation → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t4"
+                    {:op :item/authenticate :subject "it-400" :item-id "it-400" :verdict :authentic
+                     :confidence 0.9 :condition-verified :good
+                     :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-demo-auth"}
+                     :unsourced? true}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:source-provenance-gate} (-> (store/ledger db) first :basis)))
+      (is (nil? (store/authentication db "it-400"))))))
+
+(deftest unlicensed-authentication-class-is-held
+  (testing "a licensed-authentication-service citation whose license is inactive → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t4b"
+                    {:op :item/authenticate :subject "it-400" :item-id "it-400" :verdict :authentic
+                     :confidence 0.9 :condition-verified :good
+                     :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-lapsed"}}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:source-provenance-gate} (-> (store/ledger db) first :basis))))))
+
+(deftest sale-of-unauthenticated-required-category-is-held
+  (testing "a sale in an authentication-required category with no :authentic verdict → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t5"
+                    {:op :sale/confirm :subject "it-400" :item-id "it-400" :buyer-id "by-1"}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:counterfeit-flag-gate} (-> (store/ledger db) first :basis)))
+      (is (not= :sold (:status (store/item db "it-400")))))))
+
+(deftest sale-with-counterfeit-verdict-is-held
+  (testing "a sale where authentication verdict is :counterfeit → HOLD, regardless of confidence"
+    (let [[db actor] (fresh)]
+      (store/commit-record! db {:effect :authentication-upsert
+                                :value {:item-id "it-400" :verdict :counterfeit :confidence 0.99
+                                        :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-demo-auth"}}})
+      (let [res (exec-op actor "t5b"
+                       {:op :sale/confirm :subject "it-400" :item-id "it-400" :buyer-id "by-1"}
+                       listing-agent)]
+        (is (= :hold (get-in res [:state :disposition])))
+        (is (some #{:counterfeit-flag-gate} (-> (store/ledger db) first :basis)))))))
+
+(deftest sale-with-condition-misrepresentation-is-held
+  (testing "claimed/verified condition differing by more than one step → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t6"
+                    {:op :sale/confirm :subject "it-600" :item-id "it-600" :buyer-id "by-1"}
+                    listing-agent)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:condition-misrepresentation-gate} (-> (store/ledger db) first :basis)))
+      (is (not= :sold (:status (store/item db "it-600")))))))
+
+(deftest uncontracted-disclosure-is-held
+  (testing "a disclosure query from a tenant with no registered contract → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t7"
+                    {:op :disclosure/query :subject "it-100" :item-id "it-100"}
+                    {:actor-id "sub-2" :actor-role :subscriber :tenant "tenant-ghost"})]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:licensed-disclosure} (-> (store/ledger db) first :basis))))))
+
+(deftest over-disclosure-beyond-tier-is-held
+  (testing "a disclosure query pulling columns beyond the contract's tier → HOLD"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t8"
+                    {:op :disclosure/query :subject "it-100" :item-id "it-100" :greedy? true}
+                    {:actor-id "sub-1" :actor-role :subscriber :tenant "tenant-basic"})]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:licensed-disclosure} (-> (store/ledger db) first :basis))))))
+
+(deftest clean-disclosure-within-tier-commits-directly
+  (testing "a clean, in-tier disclosure query auto-serves (it's a governed read)"
+    (let [[_db actor] (fresh)
+          res (exec-op actor "t8b"
+                    {:op :disclosure/query :subject "it-100" :item-id "it-100"}
+                    {:actor-id "sub-1" :actor-role :subscriber :tenant "tenant-basic"})]
+      (is (= :commit (get-in res [:state :disposition]))))))
+
+(deftest high-value-sale-escalates-then-human-decides
+  (testing "a clean, authenticated high-value sale still interrupts for human approval"
+    (let [[db actor] (fresh)
+          r1 (exec-op actor "t9"
+                   {:op :sale/confirm :subject "it-200" :item-id "it-200" :buyer-id "by-1"}
+                   listing-agent)]
+      (is (= :interrupted (:status r1)) "pauses for human approval")
+      (is (= :high-value-holding-period (-> r1 :state :audit last :reason)))
+      (testing "approve → commit"
+        (let [r2 (g/run* actor {:approval {:status :approved :by "compliance-1"}}
+                         {:thread-id "t9" :resume? true})]
+          (is (= :commit (get-in r2 [:state :disposition])))
+          (is (= :sold (:status (store/item db "it-200"))))
+          (is (= :commit (-> (store/ledger db) last :disposition)))))))
+  (testing "reject → hold"
+    (let [[db actor] (fresh)
+          _  (exec-op actor "t10"
+                  {:op :sale/confirm :subject "it-200" :item-id "it-200" :buyer-id "by-1"}
+                  listing-agent)
+          r2 (g/run* actor {:approval {:status :rejected :by "compliance-1"}}
+                     {:thread-id "t10" :resume? true})]
+      (is (= :hold (get-in r2 [:state :disposition])))
+      (is (not= :sold (:status (store/item db "it-200")))))))
+
+(deftest correction-request-always-escalates-regardless-of-confidence
+  (testing "a dispute always reaches a human, never auto-resolves"
+    (let [[db actor] (fresh)
+          before (store/item db "it-100")
+          r1 (exec-op actor "t11"
+                   {:op :correction/request :subject "it-100" :disputed-field :condition-claimed :claim :fair}
+                   officer)]
+      (is (= :interrupted (:status r1)))
+      (is (= :dispute-request (-> r1 :state :audit last :reason)))
+      (testing "approve → commit applies the correction"
+        (let [r2 (g/run* actor {:approval {:status :approved :by "compliance-1"}}
+                         {:thread-id "t11" :resume? true})]
+          (is (= :commit (get-in r2 [:state :disposition])))
+          (is (= :fair (:condition-claimed (store/item db "it-100"))))))
+      (testing "a second, rejected dispute leaves the item unchanged"
+        (let [[db2 actor2] (fresh)
+              _  (exec-op actor2 "t12"
+                      {:op :correction/request :subject "it-100" :disputed-field :condition-claimed :claim :fair}
+                      officer)
+              r3 (g/run* actor2 {:approval {:status :rejected :by "compliance-1"}}
+                        {:thread-id "t12" :resume? true})]
+          (is (= :hold (get-in r3 [:state :disposition])))
+          (is (= (:condition-claimed before) (:condition-claimed (store/item db2 "it-100")))))))))
+
+(deftest every-decision-leaves-one-ledger-fact
+  (testing "write-only-through-ledger: N operations → N ledger facts"
+    (let [[db actor] (fresh)]
+      (exec-op actor "a" {:op :item/intake :subject "it-999" :item-id "it-999" :category :apparel
+                          :brand "X" :condition-claimed :good :seller-id "sl-1" :price 40.00M}
+               listing-agent)
+      (exec-op actor "b" {:op :item/authenticate :subject "it-400" :item-id "it-400" :verdict :authentic
+                          :confidence 0.9 :condition-verified :good
+                          :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-demo-auth"}
+                          :unsourced? true}
+               listing-agent)
+      (is (= 2 (count (store/ledger db)))
+          "one commit + one hold, both recorded"))))

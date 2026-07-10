@@ -1,0 +1,63 @@
+(ns resale.store-contract-test
+  "The Store contract, run against BOTH backends. Proving MemStore and the
+  Datomic-backed (langchain.db) store satisfy the same contract is what
+  makes 'swap the SSoT for Datomic' a configuration change, not a rewrite."
+  (:require [clojure.test :refer [deftest is testing]]
+            [resale.store :as store]))
+
+(defn- backends []
+  [["MemStore" (store/seed-db)] ["DatomicStore" (store/datomic-seed-db)]])
+
+(deftest read-parity
+  (doseq [[label s] (backends)]
+    (testing label
+      (is (= "DemoWear" (:brand (store/item s "it-100"))))
+      (is (= :apparel (:category (store/item s "it-100"))))
+      (is (= :high-value (:value-tier (store/item s "it-200"))))
+      (is (= :authentic (:verdict (store/authentication s "it-200"))))
+      (is (= {:class :licensed-authentication-service :ref "lic-demo-auth:it-200" :license-id "lic-demo-auth"}
+             (:source (store/authentication s "it-200")))
+          "source citation round-trips (stored as EDN on Datomic, not a sub-entity)")
+      (is (false? (:kyc-verified? (store/seller s "sl-3"))))
+      (is (true? (:active? (store/verification-license s "lic-demo-auth"))))
+      (is (= 5 (count (store/all-items s)))))))
+
+(deftest write-and-ledger-parity
+  (doseq [[label s] (backends)]
+    (testing label
+      (testing "partial item upsert merges, preserving untouched fields"
+        (store/commit-record! s {:effect :item-upsert :value {:id "it-100" :status :listed}})
+        (is (= :listed (:status (store/item s "it-100"))))
+        (is (= "DemoWear" (:brand (store/item s "it-100"))) "brand preserved"))
+      (testing "authentication upsert commits"
+        (store/commit-record! s {:effect :authentication-upsert
+                                 :value {:item-id "it-400" :verdict :authentic :confidence 0.9
+                                         :source {:class :licensed-authentication-service :ref "demo" :license-id "lic-demo-auth"}}})
+        (is (= :authentic (:verdict (store/authentication s "it-400")))))
+      (testing "sale-confirm updates status"
+        (store/commit-record! s {:effect :sale-confirm :value {:id "it-100" :status :sold :buyer-id "by-9"}})
+        (is (= :sold (:status (store/item s "it-100")))))
+      (testing "correction-apply patches the target item"
+        (store/commit-record! s {:effect :correction-apply
+                                 :value {:kind :items :patch {:condition-claimed :fair}}
+                                 :path ["it-100"]})
+        (is (= :fair (:condition-claimed (store/item s "it-100")))))
+      (testing "ledger is append-only and order-preserving"
+        (store/append-ledger! s {:op :a :disposition :commit})
+        (store/append-ledger! s {:op :b :disposition :hold})
+        (is (= [:commit :hold] (mapv :disposition (take-last 2 (store/ledger s)))))))))
+
+(deftest contract-lookup
+  (doseq [[label s] (backends)]
+    (testing label
+      (is (= :tier/pro (:tier (store/contract s "tenant-acme"))))
+      (is (true? (:active? (store/contract s "tenant-acme"))))
+      (is (nil? (store/contract s "tenant-ghost"))))))
+
+(deftest datomic-empty-store-is-usable
+  (let [s (store/datomic-store)]
+    (is (nil? (store/item s "nope")))
+    (is (= [] (store/all-items s)))
+    (is (= [] (store/ledger s)))
+    (store/with-items s {"x" {:id "x" :category :apparel :brand "X"}})
+    (is (= "X" (:brand (store/item s "x"))))))

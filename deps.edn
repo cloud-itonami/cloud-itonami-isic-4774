@@ -4,7 +4,11 @@
  ;; the kotoba-lang org of this workspace (kotoba wasm → clojurewasm →
  ;; ClojureScript → nbb runtime priority, CLAUDE.md).
  :deps {io.github.kotoba-lang/langgraph
-        {:local/root "../../kotoba-lang/langgraph"}}
+        {:local/root "../../kotoba-lang/langgraph"}
+        ;; shared langchain.db store seam (EDN-blob codec) -- see
+        ;; resale.store's DatomicStore, ADR-2607141600.
+        io.github.kotoba-lang/langchain-store
+        {:local/root "../../kotoba-lang/langchain-store"}}
  :aliases
  {;; offline workspace dev — pin transitive langchain to local checkout
   :dev {:override-deps

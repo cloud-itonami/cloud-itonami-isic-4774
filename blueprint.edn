@@ -1,0 +1,48 @@
+[{:itonami.blueprint/id "cloud-itonami-isic-4774"
+  :itonami.blueprint/name "Retail Sale of Second-Hand Goods (peer-to-peer/consignment resale marketplace)"
+  :itonami.blueprint/isic-rev5 "4774"
+  :itonami.blueprint/isic-citation "ISIC Rev.4 4774: \"retail sale of second-hand goods\" (https://unstats.un.org/unsd/classifications/Econ/Detail/EN/27/4774)"
+  :itonami.blueprint/domain :retail/secondhand-resale
+  :itonami.blueprint/license "AGPL-3.0-or-later"
+  :itonami.blueprint/social-impact [:consumer-protection :counterfeit-prevention :stolen-goods-reporting :circular-economy]
+  :itonami.blueprint/governor :resale-governor
+  :itonami.blueprint/robotics false
+  :itonami.blueprint/required-technologies [:identity :forms :dmn :bpmn :audit-ledger]
+  :itonami.blueprint/status :public-oss
+  :itonami.blueprint/maturity :implemented
+  :itonami.blueprint/implemented-slice
+  "ResaleAdvisor-LLM ⊣ ResaleGovernor (resale.policy, six HARD checks: rbac ·
+  stolen-goods-reporting-gate · source-provenance-gate · counterfeit-flag-gate ·
+  condition-misrepresentation-gate · licensed-disclosure, plus three SOFT
+  checks: confidence-floor · high-value-holding-period · dispute-always-
+  escalates), a genuinely compiled langgraph-clj StateGraph
+  (resale.operation/build: :intake -> :advise -> :govern -> :decide -+->
+  :commit / :request-approval -> :commit / :hold, `interrupt-before
+  #{:request-approval}` + in-memory checkpointer for real human-in-the-loop
+  resume), append-only audit ledger (resale.store/ledger + append-ledger!,
+  MemStore/DatomicStore parity). Five governed ops
+  (:item/intake, :item/authenticate, :sale/confirm, :correction/request,
+  :disclosure/query), each routed through the ResaleGovernor with no
+  bypass. stolen-goods-reporting-gate and counterfeit-flag-gate are
+  secondhand-resale-specific HARD checks with no analog in sibling
+  cloud-itonami actors, modeled on real secondhand-dealer reporting
+  statutes (California Business and Professions Code Section 21625 et
+  seq.; New York General Business Law Article 5 Sections 60-70) --
+  confidence-independent rejection of a high-value/flagged-category
+  intake from a non-KYC or previously-flagged seller, and of a sale in an
+  authentication-required category whose current verdict is not
+  :authentic. A rollout phase gate (resale.phase) sits on top of the
+  governor and can only narrow, never widen, what the governor already
+  allowed. Authentication provenance is structurally scoped to one real
+  free public source (resale.facts: USPTO TESS trademark search, for
+  brand-registration lookup only) plus two licensed provenance classes
+  (:licensed-authentication-service, :licensed-secondhand-reporting-feed)
+  gated on an ACTIVE operator-registered license -- no bare 'the LLM
+  inferred it' authentication verdict is accepted. The schema has no
+  field anywhere for buyer payment credentials or seller bank details
+  (ADR-2607113000 Section 1) -- this actor mediates listing/
+  authentication/sale decisions only. 37 tests / 138 assertions green
+  (`clojure -M:dev:test`), clj-kondo 0 errors, `clojure -M:dev:run` demo
+  runnable end-to-end (8-operation walkthrough producing real commit/hold
+  ledger entries for every gate)."
+  :db/id -1}]

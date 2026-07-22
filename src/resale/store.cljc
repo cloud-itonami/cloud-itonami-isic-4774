@@ -19,10 +19,9 @@
   explicitly the payment processor's job, out of scope, ADR-2607113000 §1).
 
   The ledger stays append-only on every backend."
-  (:require #?(:clj  [clojure.edn :as edn]
-               :cljs [cljs.reader :as edn])
-            [clojure.string :as str]
-            [langchain.db :as d]))
+  (:require [clojure.string :as str]
+            [langchain.db :as d]
+            [langchain-store.core :as ls]))
 
 (defprotocol Store
   (item [s id])
@@ -130,25 +129,22 @@
    :contract/tenant         {:db/unique :db.unique/identity}
    :ledger/seq              {:db/unique :db.unique/identity}})
 
-(defn- enc [v] (pr-str v))
-(defn- dec* [s] (when s (edn/read-string s)))
-
 (defn- item->tx [{:keys [id category brand condition-claimed condition-verified status seller-id price value-tier]}]
   (cond-> {:item/id id}
     category           (assoc :item/category category)
     brand              (assoc :item/brand brand)
     condition-claimed  (assoc :item/condition-claimed condition-claimed)
-    true               (assoc :item/condition-verified (enc condition-verified))
+    true               (assoc :item/condition-verified (ls/enc condition-verified))
     status             (assoc :item/status status)
     seller-id          (assoc :item/seller-id seller-id)
-    price              (assoc :item/price (enc price))
+    price              (assoc :item/price (ls/enc price))
     value-tier         (assoc :item/value-tier value-tier)))
 
 (defn- pull->item [m]
   (when (:item/id m)
     {:id (:item/id m) :category (:item/category m) :brand (:item/brand m)
-     :condition-claimed (:item/condition-claimed m) :condition-verified (dec* (:item/condition-verified m))
-     :status (:item/status m) :seller-id (:item/seller-id m) :price (dec* (:item/price m))
+     :condition-claimed (:item/condition-claimed m) :condition-verified (ls/dec* (:item/condition-verified m))
+     :status (:item/status m) :seller-id (:item/seller-id m) :price (ls/dec* (:item/price m))
      :value-tier (:item/value-tier m)}))
 
 (def ^:private item-pull
@@ -169,24 +165,24 @@
 
 (defn- authentication->tx [{:keys [item-id verdict confidence source]}]
   {:authentication/item-id item-id :authentication/verdict verdict
-   :authentication/confidence (enc confidence) :authentication/source (enc source)})
+   :authentication/confidence (ls/enc confidence) :authentication/source (ls/enc source)})
 
 (defn- pull->authentication [m]
   (when (:authentication/item-id m)
     {:item-id (:authentication/item-id m) :verdict (:authentication/verdict m)
-     :confidence (dec* (:authentication/confidence m)) :source (dec* (:authentication/source m))}))
+     :confidence (ls/dec* (:authentication/confidence m)) :source (ls/dec* (:authentication/source m))}))
 
 (def ^:private authentication-pull
   [:authentication/item-id :authentication/verdict :authentication/confidence :authentication/source])
 
 (defn- verification-license->tx [{:keys [license-id provider classes active?]}]
   {:verification-license/id license-id :verification-license/provider provider
-   :verification-license/classes (enc classes) :verification-license/active active?})
+   :verification-license/classes (ls/enc classes) :verification-license/active active?})
 
 (defn- pull->verification-license [m]
   (when (:verification-license/id m)
     {:license-id (:verification-license/id m) :provider (:verification-license/provider m)
-     :classes (dec* (:verification-license/classes m)) :active? (:verification-license/active m)}))
+     :classes (ls/dec* (:verification-license/classes m)) :active? (:verification-license/active m)}))
 
 (def ^:private verification-license-pull
   [:verification-license/id :verification-license/provider :verification-license/classes :verification-license/active])
@@ -218,7 +214,7 @@
   (ledger [_]
     (->> (d/q '[:find ?s ?f :where [?e :ledger/seq ?s] [?e :ledger/fact ?f]] (d/db conn))
          (sort-by first)
-         (mapv (comp dec* second))))
+         (mapv (comp ls/dec* second))))
   (commit-record! [s {:keys [effect path value]}]
     (case effect
       :item-upsert
@@ -235,7 +231,7 @@
       nil)
     s)
   (append-ledger! [s fact]
-    (d/transact! conn [{:ledger/seq (count (ledger s)) :ledger/fact (enc fact)}])
+    (d/transact! conn [{:ledger/seq (count (ledger s)) :ledger/fact (ls/enc fact)}])
     fact)
   (with-items [s is]
     (when (seq is) (d/transact! conn (mapv item->tx (vals is)))) s)

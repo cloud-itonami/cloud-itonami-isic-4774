@@ -19,7 +19,7 @@
   explicitly the payment processor's job, out of scope, ADR-2607113000 §1).
 
   The ledger stays append-only on every backend."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [langchain.db :as d]
             [langchain-store.core :as ls]))
 

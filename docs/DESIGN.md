@@ -23,7 +23,7 @@ resale marケットプレイスを、OSS の actor として自前運用する�
 
 ## 2. OperationActor 内部(ResaleAdvisor-LLM ラッパー)
 
-`src/resale/operation.cljc` の langgraph StateGraph として実装。
+`src/resale/operation.cljk` の langgraph StateGraph として実装。
 **1 run = 1 操作** — 有界で監査可能、無限内部ループを持たない。
 
 ```
@@ -46,7 +46,7 @@ intake → advise → govern → decide ─┬─ commit ───────�
 
 ## 3. ResaleGovernor(独立検閲層)
 
-`src/resale/policy.cljc`。
+`src/resale/policy.cljk`。
 
 判定の優先順位(上が強い、HARD は人間承認でも上書き不可):
 
@@ -69,16 +69,16 @@ intake → advise → govern → decide ─┬─ commit ───────�
 
 ## 4. SSoT と監査台帳
 
-`src/resale/store.cljc`。entities: `items` `sellers` `authentications`
+`src/resale/store.cljk`。entities: `items` `sellers` `authentications`
 `verification-licenses` `contracts`。`append-ledger!` が全 commit/reject/
 開示を不変台帳に積む。
 
 ## 5. デモ(`clojure -M:dev:run`)
 
-`src/resale/sim.cljc` が8操作を actor に通す(§sim.cljc docstring 参照)。
+`src/resale/sim.cljk` が8操作を actor に通す(§sim.cljc docstring 参照)。
 
 ## 6. テスト(`clojure -M:dev:test`)
 
-`test/resale/policy_contract_test.clj` がガバナンス契約を実行可能にする。
-`test/resale/phase_test.clj` が段階導入を保証。`test/resale/facts_test.clj`
+`test/resale/policy_contract_test.cljk` がガバナンス契約を実行可能にする。
+`test/resale/phase_test.cljk` が段階導入を保証。`test/resale/facts_test.cljk`
 が出典カタログの正直さを保証。

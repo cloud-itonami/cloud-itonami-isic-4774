@@ -34,7 +34,7 @@ This actor **mediates listing, authentication and sale decisions**. It
 never touches buyer payment credentials or seller bank details — there is
 no field anywhere in this schema for payment processing (see
 `docs/adr/0001-architecture.md`). Authentication provenance is limited to
-a real, citable public reference (`src/resale/facts.cljc`: USPTO trademark
+a real, citable public reference (`src/resale/facts.cljk`: USPTO trademark
 search, for brand-registration lookup only) or an operator-registered
 `:licensed-authentication-service` / `:licensed-secondhand-reporting-feed`
 — every authentication verdict must resolve to one of these, never a bare

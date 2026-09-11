@@ -42,7 +42,7 @@
   field anywhere for buyer payment credentials or seller bank details
   (ADR-2607113000 Section 1) -- this actor mediates listing/
   authentication/sale decisions only. 37 tests / 138 assertions green
-  (`clojure -M:dev:test`), clj-kondo 0 errors, `clojure -M:dev:run` demo
+  (`kbb -M:dev:test`), clj-kondo 0 errors, `kbb -M:dev:run` demo
   runnable end-to-end (8-operation walkthrough producing real commit/hold
   ledger entries for every gate)."
   :db/id -1}]

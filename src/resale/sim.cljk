@@ -13,7 +13,7 @@
     op7  紛争申立て(どの phase でも常に人間レビュー)          → escalate → approve → commit
     op8  開示クエリが未契約 tenant から                       → licensed-disclosure REJECT → hold
 
-  Run: clojure -M:dev:run"
+  Run: kbb -M:dev:run"
   (:require [langgraph.graph :as g]
             [resale.store :as store]
             [resale.operation :as op]

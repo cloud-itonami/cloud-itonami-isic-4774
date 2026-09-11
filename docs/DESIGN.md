@@ -73,11 +73,11 @@ intake → advise → govern → decide ─┬─ commit ───────�
 `verification-licenses` `contracts`。`append-ledger!` が全 commit/reject/
 開示を不変台帳に積む。
 
-## 5. デモ(`clojure -M:dev:run`)
+## 5. デモ(`kbb -M:dev:run`)
 
 `src/resale/sim.cljk` が8操作を actor に通す(§sim.cljc docstring 参照)。
 
-## 6. テスト(`clojure -M:dev:test`)
+## 6. テスト(`kbb -M:dev:test`)
 
 `test/resale/policy_contract_test.cljk` がガバナンス契約を実行可能にする。
 `test/resale/phase_test.cljk` が段階導入を保証。`test/resale/facts_test.cljk`

@@ -8,8 +8,8 @@ This guide is for people who want to start an open business from
 ```bash
 git clone https://github.com/cloud-itonami/cloud-itonami-isic-4774
 cd cloud-itonami-isic-4774
-clojure -M:dev:test
-clojure -M:dev:run
+kbb -M:dev:test
+kbb -M:dev:run
 ```
 
 The default demo uses entirely fictitious items, sellers and licenses.
@@ -37,8 +37,8 @@ real, verifiable source citation.
 - configure Datomic Local, kotoba-server or an equivalent durable SSoT
 - configure the LLM adapter through environment variables or secret manager
 - define subscriber contract tenants/tiers and RBAC rules
-- run `clojure -M:dev:test`
-- run `clojure -M:lint`
+- run `kbb -M:dev:test`
+- run `kbb -M:lint`
 - verify audit-ledger export
 - document backup and restore
 - document incident response

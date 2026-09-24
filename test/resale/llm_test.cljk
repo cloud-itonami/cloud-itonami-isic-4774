@@ -1,7 +1,7 @@
 (ns resale.llm-test
   "ResaleAdvisor-LLM proposal generation, unit-level (no governor/actor
   involved — that integration is covered by policy_contract_test)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [resale.store :as store]
             [resale.llm :as llm]))
 

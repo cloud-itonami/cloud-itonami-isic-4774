@@ -41,7 +41,7 @@
                                       secondhand dealer may resell).
     9. dispute (correction) requests — SOFT, unconditional, never
                                       auto-resolves at any phase."
-  (:require [clojure.set :as set]
+  (:require [kotoba.lang.coll :as set]
             [resale.facts :as facts]
             [resale.store :as store]))
 

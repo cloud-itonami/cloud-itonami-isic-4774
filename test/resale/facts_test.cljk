@@ -1,7 +1,7 @@
 (ns resale.facts-test
   "The R0 source catalog is the whole ground truth for the source-
   provenance gate — these tests guard its own internal honesty."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [resale.facts :as facts]))
 
 (deftest catalog-entries-are-well-formed

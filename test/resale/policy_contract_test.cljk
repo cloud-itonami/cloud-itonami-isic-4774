@@ -6,7 +6,7 @@
     ResaleAdvisor-LLM never intakes/authenticates/sells/discloses a record
     the ResaleGovernor would reject, and every decision (commit OR hold)
     leaves exactly one ledger fact."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [resale.store :as store]
             [resale.operation :as op]))

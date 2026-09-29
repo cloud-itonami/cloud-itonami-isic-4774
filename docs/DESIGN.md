@@ -41,7 +41,7 @@ intake → advise → govern → decide ─┬─ commit ───────�
 - **Advisor**(`resale.llm/Advisor` プロトコル): `mock-advisor`(既定)/
   `llm-advisor`(`langchain.model` の ChatModel)。
 - **Phase**(`resale.phase`、context の `:phase 0..3`): 段階導入。
-  **`default-phase` は最初から `1`**(fail-open バグを回避、CLAUDE.md 参照)。
+  **`default-phase` は最初から `1`**(fail-open バグを回避、AGENTS.md 参照)。
   **`:correction/request` はどの phase の `:auto` にも入らない**。
 
 ## 3. ResaleGovernor(独立検閲層)
